@@ -135,6 +135,39 @@ def detect_paper(image_path, paper_size='A4'):
             y_pix = int(y_mm * ppm_height)
             cv2.line(gridded, (0, y_pix), (output_width - 1, y_pix), (0, 0, 255), 2)
         save_debug_image(gridded, debug_folder, step, "gridded")
+        step += 1
+
+        # ------------------------------
+        # Tool detection on top of warped paper
+        # ------------------------------
+        gray_tool = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        save_debug_image(gray_tool, debug_folder, step, "tool_gray")
+        step += 1
+
+        # Adaptive threshold to detect tool
+        tool_thresh = cv2.adaptiveThreshold(
+            gray_tool, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 11, 2
+        )
+        save_debug_image(tool_thresh, debug_folder, step, "tool_thresh")
+        step += 1
+
+        tool_thresh = cv2.medianBlur(tool_thresh, 5)
+        save_debug_image(tool_thresh, debug_folder, step, "tool_blur")
+        step += 1
+
+        # Find contours (external only)
+        tool_contours, _ = cv2.findContours(tool_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if tool_contours:
+            # Keep only the largest contour
+            largest_tool = max(tool_contours, key=cv2.contourArea)
+
+            # Draw only the largest contour
+            tool_outline = warped.copy()
+            cv2.drawContours(tool_outline, [largest_tool], -1, (0, 255, 0), 3)
+            save_debug_image(tool_outline, debug_folder, step, "tool_detected")
+        step += 1
 
     else:
         print("⚠️ No rectangular contour found.")
