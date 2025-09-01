@@ -18,4 +18,4 @@ This Python project automatically detects a tool on a photographed paper sheet, 
 
 ---
 
-[Demo](pictures/animation.webp)
+![Demo](pictures/animation.webp)
