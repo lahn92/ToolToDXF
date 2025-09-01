@@ -2,6 +2,12 @@ import cv2
 import numpy as np
 import sys
 import os
+import ezdxf
+from shapely.geometry import Polygon
+
+# ------------------------------
+# Helper functions
+# ------------------------------
 
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
@@ -18,12 +24,40 @@ def save_debug_image(img, folder, step, name):
     cv2.imwrite(filename, img)
     print(f"Step {step}: saved {filename}")
 
-def detect_paper(image_path, paper_size='A4'):
-    # Ensure debug folder exists
+def contour_to_dxf(contour, output_path="tool.dxf", offset_mm=1.0, ppm_width=1.0, ppm_height=1.0):
+    # Convert contour pixels to mm
+    points_mm = []
+    for pt in contour.reshape(-1, 2):
+        x_mm = pt[0] / ppm_width
+        y_mm = pt[1] / ppm_height
+        points_mm.append((x_mm, y_mm))
+
+    # Create shapely polygon
+    poly = Polygon(points_mm)
+
+    # Apply offset (buffer)
+    poly_offset = poly.buffer(offset_mm, join_style=2)
+
+    # Convert back to list of points
+    exterior_coords = list(poly_offset.exterior.coords)
+
+    # Create DXF document
+    doc = ezdxf.new(dxfversion='R2010')
+    msp = doc.modelspace()
+    msp.add_lwpolyline(exterior_coords, close=True)
+    doc.saveas(output_path)
+    print(f"✅ DXF saved to {output_path}")
+
+# ------------------------------
+# Main detection function
+# ------------------------------
+
+def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
     debug_folder = "debug"
     os.makedirs(debug_folder, exist_ok=True)
     step = 1
 
+    # Paper sizes in mm
     sizes = {
         'A0': (841, 1189),
         'A1': (594, 841),
@@ -35,9 +69,10 @@ def detect_paper(image_path, paper_size='A4'):
         'A7': (74, 105),
         'A8': (52, 74),
     }
+
     paper_size = paper_size.upper()
     if paper_size not in sizes:
-        print(f"⚠️ Unknown paper size '{paper_size}'. Defaulting to A4.")
+        print(f"⚠️ Unknown paper size '{paper_size}', defaulting to A4.")
         paper_size = 'A4'
 
     portrait_width_mm, portrait_height_mm = sizes[paper_size]
@@ -127,6 +162,7 @@ def detect_paper(image_path, paper_size='A4'):
         save_debug_image(warped, debug_folder, step, "warped")
         step += 1
 
+        # Draw grid
         gridded = warped.copy()
         for x_mm in range(0, int(dst_width_mm) + 1, 10):
             x_pix = int(x_mm * ppm_width)
@@ -144,7 +180,6 @@ def detect_paper(image_path, paper_size='A4'):
         save_debug_image(gray_tool, debug_folder, step, "tool_gray")
         step += 1
 
-        # Adaptive threshold to detect tool
         tool_thresh = cv2.adaptiveThreshold(
             gray_tool, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY_INV, 11, 2
@@ -156,26 +191,37 @@ def detect_paper(image_path, paper_size='A4'):
         save_debug_image(tool_thresh, debug_folder, step, "tool_blur")
         step += 1
 
-        # Find contours (external only)
         tool_contours, _ = cv2.findContours(tool_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if tool_contours:
-            # Keep only the largest contour
             largest_tool = max(tool_contours, key=cv2.contourArea)
 
-            # Draw only the largest contour
             tool_outline = warped.copy()
             cv2.drawContours(tool_outline, [largest_tool], -1, (0, 255, 0), 3)
             save_debug_image(tool_outline, debug_folder, step, "tool_detected")
-        step += 1
+            step += 1
 
+            # ------------------------------
+            # Export DXF
+            # ------------------------------
+            os.makedirs(os.path.join(debug_folder, "dxf"), exist_ok=True)
+            dxf_path = os.path.join(debug_folder, "dxf", "tool_contour.dxf")
+            contour_to_dxf(largest_tool, dxf_path, offset_mm, ppm_width, ppm_height)
+
+        else:
+            print("⚠️ No tool contours found.")
     else:
         print("⚠️ No rectangular contour found.")
+
+# ------------------------------
+# Command-line interface
+# ------------------------------
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         image_path = sys.argv[1]
         paper_size = sys.argv[2] if len(sys.argv) > 2 else 'A4'
-        detect_paper(image_path, paper_size)
+        offset_mm = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
+        detect_paper(image_path, paper_size, offset_mm)
     else:
-        print("Usage: python script.py <image_path> [paper_size]")
+        print("Usage: python script.py <image_path> [paper_size] [offset_mm]")
