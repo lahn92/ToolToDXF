@@ -25,23 +25,14 @@ def save_debug_image(img, folder, step, name):
     print(f"Step {step}: saved {filename}")
 
 def contour_to_dxf(contour, output_path="tool.dxf", offset_mm=1.0, ppm_width=1.0, ppm_height=1.0):
-    # Convert contour pixels to mm
     points_mm = []
     for pt in contour.reshape(-1, 2):
         x_mm = pt[0] / ppm_width
         y_mm = pt[1] / ppm_height
         points_mm.append((x_mm, y_mm))
-
-    # Create shapely polygon
     poly = Polygon(points_mm)
-
-    # Apply offset (buffer)
     poly_offset = poly.buffer(offset_mm, join_style=2)
-
-    # Convert back to list of points
     exterior_coords = list(poly_offset.exterior.coords)
-
-    # Create DXF document
     doc = ezdxf.new(dxfversion='R2010')
     msp = doc.modelspace()
     msp.add_lwpolyline(exterior_coords, close=True)
@@ -57,17 +48,10 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
     os.makedirs(debug_folder, exist_ok=True)
     step = 1
 
-    # Paper sizes in mm
     sizes = {
-        'A0': (841, 1189),
-        'A1': (594, 841),
-        'A2': (420, 594),
-        'A3': (297, 420),
-        'A4': (210, 297),
-        'A5': (148, 210),
-        'A6': (105, 148),
-        'A7': (74, 105),
-        'A8': (52, 74),
+        'A0': (841, 1189), 'A1': (594, 841), 'A2': (420, 594),
+        'A3': (297, 420), 'A4': (210, 297), 'A5': (148, 210),
+        'A6': (105, 148), 'A7': (74, 105), 'A8': (52, 74),
     }
 
     paper_size = paper_size.upper()
@@ -77,7 +61,6 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
 
     portrait_width_mm, portrait_height_mm = sizes[paper_size]
     expected_aspect = portrait_height_mm / portrait_width_mm
-
     DPI = 300
 
     img = cv2.imread(image_path)
@@ -94,7 +77,6 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
     step += 1
 
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
     paper_contour = None
     max_area = 0
     for cnt in contours:
@@ -174,40 +156,46 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
         step += 1
 
         # ------------------------------
-        # Tool detection on top of warped paper
+        # Robust Tool detection on top of warped paper (more detailed)
         # ------------------------------
         gray_tool = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
         save_debug_image(gray_tool, debug_folder, step, "tool_gray")
         step += 1
 
-        tool_thresh = cv2.adaptiveThreshold(
-            gray_tool, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, 11, 2
-        )
-        save_debug_image(tool_thresh, debug_folder, step, "tool_thresh")
+        # Threshold to create mask
+        _, tool_mask = cv2.threshold(gray_tool, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Optional: slight blur to smooth edges but keep detail
+        tool_mask = cv2.GaussianBlur(tool_mask, (3, 3), 0)
+        save_debug_image(tool_mask, debug_folder, step, "tool_mask_blurred")
         step += 1
 
-        tool_thresh = cv2.medianBlur(tool_thresh, 5)
-        save_debug_image(tool_thresh, debug_folder, step, "tool_blur")
+        # Morphological closing to fill small holes
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        tool_mask = cv2.morphologyEx(tool_mask, cv2.MORPH_CLOSE, kernel)
+        save_debug_image(tool_mask, debug_folder, step, "tool_closed")
         step += 1
 
-        tool_contours, _ = cv2.findContours(tool_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Find contours with all points preserved
+        tool_contours, _ = cv2.findContours(tool_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
         if tool_contours:
             largest_tool = max(tool_contours, key=cv2.contourArea)
 
+            # Small epsilon for minimal simplification
+            epsilon = 0.0001 * cv2.arcLength(largest_tool, True)
+            largest_tool = cv2.approxPolyDP(largest_tool, epsilon, True)
+
+            # Draw final tool contour
             tool_outline = warped.copy()
-            cv2.drawContours(tool_outline, [largest_tool], -1, (0, 255, 0), 3)
-            save_debug_image(tool_outline, debug_folder, step, "tool_detected")
+            cv2.drawContours(tool_outline, [largest_tool], -1, (0, 255, 0), 2)
+            save_debug_image(tool_outline, debug_folder, step, "tool_detected_detailed")
             step += 1
 
-            # ------------------------------
             # Export DXF
-            # ------------------------------
             os.makedirs(os.path.join(debug_folder, "dxf"), exist_ok=True)
             dxf_path = os.path.join(debug_folder, "dxf", "tool_contour.dxf")
             contour_to_dxf(largest_tool, dxf_path, offset_mm, ppm_width, ppm_height)
-
         else:
             print("⚠️ No tool contours found.")
     else:
