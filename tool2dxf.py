@@ -25,28 +25,52 @@ def save_debug_image(img, folder, step, name):
     print(f"Step {step}: saved {filename}")
 
 def contour_to_dxf(contour, output_path="tool.dxf", offset_mm=1.0, ppm_width=1.0, ppm_height=1.0):
-    # Convert contour pixels to mm
     points_mm = []
     for pt in contour.reshape(-1, 2):
         x_mm = pt[0] / ppm_width
         y_mm = pt[1] / ppm_height
         points_mm.append((x_mm, y_mm))
-
-    # Create shapely polygon
     poly = Polygon(points_mm)
-
-    # Apply offset (buffer)
     poly_offset = poly.buffer(offset_mm, join_style=2)
-
-    # Convert back to list of points
     exterior_coords = list(poly_offset.exterior.coords)
-
-    # Create DXF document
     doc = ezdxf.new(dxfversion='R2010')
     msp = doc.modelspace()
     msp.add_lwpolyline(exterior_coords, close=True)
     doc.saveas(output_path)
     print(f"✅ DXF saved to {output_path}")
+
+# ------------------------------
+# GUI click refinement
+# ------------------------------
+
+clicked_points = []
+
+def click_event(event, x, y, flags, param):
+    global clicked_points
+    if event == cv2.EVENT_LBUTTONDOWN:
+        clicked_points.append((x, y))
+        cv2.circle(param, (x, y), 5, (0, 0, 255), -1)
+        cv2.imshow("Refine Tool Contour", param)
+
+def refine_contour_gui(img, contour):
+    temp_img = img.copy()
+    cv2.drawContours(temp_img, [contour], -1, (0, 255, 0), 2)
+    cv2.imshow("Refine Tool Contour", temp_img)
+    cv2.setMouseCallback("Refine Tool Contour", click_event, temp_img)
+    print("Click points you want to add to the contour. Press 'Enter' when done.")
+    while True:
+        key = cv2.waitKey(1)
+        if key == 13:  # Enter key
+            break
+    cv2.destroyWindow("Refine Tool Contour")
+    # Merge clicked points with detected contour
+    if clicked_points:
+        clicked_pts_np = np.array(clicked_points, dtype=np.int32).reshape(-1, 1, 2)
+        contour = np.concatenate((contour, clicked_pts_np))
+        # Slightly smooth the contour
+        epsilon = 0.002 * cv2.arcLength(contour, True)
+        contour = cv2.approxPolyDP(contour, epsilon, True)
+    return contour
 
 # ------------------------------
 # Main detection function
@@ -57,7 +81,6 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
     os.makedirs(debug_folder, exist_ok=True)
     step = 1
 
-    # Paper sizes in mm
     sizes = {
         'A0': (841, 1189),
         'A1': (594, 841),
@@ -77,7 +100,6 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
 
     portrait_width_mm, portrait_height_mm = sizes[paper_size]
     expected_aspect = portrait_height_mm / portrait_width_mm
-
     DPI = 300
 
     img = cv2.imread(image_path)
@@ -94,7 +116,6 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
     step += 1
 
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
     paper_contour = None
     max_area = 0
     for cnt in contours:
@@ -180,80 +201,28 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
         save_debug_image(gray_tool, debug_folder, step, "tool_gray")
         step += 1
 
-        # Threshold to create a solid mask
         _, tool_mask = cv2.threshold(gray_tool, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         save_debug_image(tool_mask, debug_folder, step, "tool_mask")
         step += 1
 
-        # Morphological closing to fill holes and smooth edges
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         tool_mask = cv2.morphologyEx(tool_mask, cv2.MORPH_CLOSE, kernel)
         save_debug_image(tool_mask, debug_folder, step, "tool_closed")
         step += 1
 
-        # Find external contours
-        tool_contours, _ = cv2.findContours(tool_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        tool_contours, _ = cv2.findContours(tool_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
         if tool_contours:
             largest_tool = max(tool_contours, key=cv2.contourArea)
 
-            # Smooth contour using approxPolyDP
-            epsilon = 0.0001 * cv2.arcLength(largest_tool, True)
-            largest_tool = cv2.approxPolyDP(largest_tool, epsilon, True)
+            # Refine contour via GUI
+            largest_tool = refine_contour_gui(warped, largest_tool)
 
-            # Optional: convex hull to remove minor concave spikes
-            largest_tool = cv2.convexHull(largest_tool)
-
-            # ------------------------------
-            # GUI for manual refinement
-            # ------------------------------
-            clicked_points = []
-
-            def click_event(event, x, y, flags, param):
-                nonlocal clicked_points
-                if event == cv2.EVENT_LBUTTONDOWN:
-                    clicked_points.append((x, y))
-                    cv2.circle(param, (x, y), 3, (0, 0, 255), -1)
-                    cv2.imshow("Refine Tool Contour - Click to add, Right-click to remove, ENTER to finish", param)
-                elif event == cv2.EVENT_RBUTTONDOWN:
-                    # Remove nearest point if close
-                    if clicked_points:
-                        distances = [np.linalg.norm(np.array([x, y]) - np.array(pt)) for pt in clicked_points]
-                        idx = np.argmin(distances)
-                        if distances[idx] < 10:  # 10px threshold
-                            clicked_points.pop(idx)
-                            param[:] = warped.copy()
-                            cv2.drawContours(param, [largest_tool], -1, (0, 255, 0), 2)
-                            for pt in clicked_points:
-                                cv2.circle(param, pt, 3, (0, 0, 255), -1)
-                            cv2.imshow("Refine Tool Contour - Click to add, Right-click to remove, ENTER to finish", param)
-
-            refinement_img = warped.copy()
-            cv2.drawContours(refinement_img, [largest_tool], -1, (0, 255, 0), 2)
-            cv2.imshow("Refine Tool Contour - Click to add, Right-click to remove, ENTER to finish", refinement_img)
-            cv2.setMouseCallback("Refine Tool Contour - Click to add, Right-click to remove, ENTER to finish", click_event, refinement_img)
-
-            print("🖱 Click on areas to include in contour. Right-click to remove. Press ENTER when done.")
-            while True:
-                key = cv2.waitKey(1) & 0xFF
-                if key == 13:  # ENTER key
-                    break
-
-            cv2.destroyAllWindows()
-
-            # Merge clicked points with detected contour
-            if clicked_points:
-                clicked_pts_np = np.array(clicked_points, dtype=np.int32).reshape(-1, 1, 2)
-                largest_tool = np.concatenate((largest_tool, clicked_pts_np))
-                largest_tool = cv2.convexHull(largest_tool)
-
-            # Draw final tool contour
             tool_outline = warped.copy()
             cv2.drawContours(tool_outline, [largest_tool], -1, (0, 255, 0), 3)
-            save_debug_image(tool_outline, debug_folder, step, "tool_detected_refined")
+            save_debug_image(tool_outline, debug_folder, step, "tool_detected_smooth")
             step += 1
 
-            # Export DXF
             os.makedirs(os.path.join(debug_folder, "dxf"), exist_ok=True)
             dxf_path = os.path.join(debug_folder, "dxf", "tool_contour.dxf")
             contour_to_dxf(largest_tool, dxf_path, offset_mm, ppm_width, ppm_height)
