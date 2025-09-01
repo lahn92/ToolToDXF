@@ -1,0 +1,10 @@
+# Ignore specific images
+1.jpg
+2.jpg
+3.jpg
+
+# Ignore virtual environment
+.venv/
+
+# Ignore debug output folder
+debug/
