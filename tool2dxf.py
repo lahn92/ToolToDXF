@@ -170,11 +170,22 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
         save_debug_image(tool_mask, debug_folder, step, "tool_mask_blurred")
         step += 1
 
-        # Morphological closing to fill small holes
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        # Morphological closing to fill holes and smooth edges
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         tool_mask = cv2.morphologyEx(tool_mask, cv2.MORPH_CLOSE, kernel)
-        save_debug_image(tool_mask, debug_folder, step, "tool_closed")
+
+        # Additional smoothing using Gaussian blur
+        tool_mask_smoothed = cv2.GaussianBlur(tool_mask, (5, 5), 0)
+
+        # Optional: re-threshold to make it strictly binary again
+        _, tool_mask_smoothed = cv2.threshold(tool_mask_smoothed, 127, 255, cv2.THRESH_BINARY)
+
+        save_debug_image(tool_mask_smoothed, debug_folder, step, "tool_smoothed")
         step += 1
+
+        # Use the smoothed mask for contour detection
+        tool_mask = tool_mask_smoothed
+
 
         # Find contours with all points preserved
         tool_contours, _ = cv2.findContours(tool_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
