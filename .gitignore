@@ -9,9 +9,14 @@
 
 tool2dxfnoGUI.py
 backup
+tool2dxf.spec
 
 # Ignore virtual environment
 .venv/
 
 # Ignore debug output folder
 debug/
+
+build/
+
+dist/
