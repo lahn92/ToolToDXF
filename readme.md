@@ -17,5 +17,8 @@ This Python project automatically detects a tool on a photographed paper sheet, 
 - Step-by-step debug images saved for verification.
 
 ---
-
+### Picture flow
 ![Demo](pictures/animation.webp)
+
+### refinment of contour
+![refinement](pictures/refinement.webp)
