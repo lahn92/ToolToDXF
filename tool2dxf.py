@@ -126,7 +126,8 @@ def draw_instructions(canvas):
         "Controls:",
         "Left-click: add polyline point",
         "Right-click: insert polyline into contour",
-        "u: undo last point",
+        "u: undo last point in current polyline",
+        "z: undo last inserted polyline",
         "c: clear current polyline",
         "Enter: finish editing"
     ]
@@ -141,6 +142,7 @@ def refine_contour_gui(img, contour_cnt):
     base = img.copy()
     polygon_cnt = contour_cnt.copy()
     current_polyline = []
+    history = []  # store contour history for undo
     last_scale = None
     last_offset = (0, 0)
 
@@ -154,34 +156,24 @@ def refine_contour_gui(img, contour_cnt):
 
     def redraw():
         nonlocal last_scale, last_offset
-        # Get current window size
         win_x, win_y, win_w, win_h = cv2.getWindowImageRect(EDITOR_WINDOW)
         h, w = base.shape[:2]
-
-        # Compute scale while keeping aspect ratio
         scale = min(win_w / w, win_h / h)
         new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
-
-        # Resize image
         resized = cv2.resize(base, new_size, interpolation=cv2.INTER_AREA)
-
-        # White background for the unused window area
         canvas = np.ones((win_h, win_w, 3), dtype=np.uint8) * 255
         offset_x = (win_w - new_size[0]) // 2
         offset_y = (win_h - new_size[1]) // 2
         canvas[offset_y:offset_y+new_size[1], offset_x:offset_x+new_size[0]] = resized
-
         last_scale = (new_size[0] / w, new_size[1] / h)
         last_offset = (offset_x, offset_y)
 
-        # Draw polygon (scaled + centered)
         scaled_cnt = np.array(
             [to_display(p[0], last_scale, last_offset) for p in polygon_cnt],
             dtype=np.int32
         ).reshape(-1, 1, 2)
         cv2.drawContours(canvas, [scaled_cnt], -1, (0, 255, 0), 2)
 
-        # Draw current polyline
         if len(current_polyline) > 1:
             pts = [to_display(p, last_scale, last_offset) for p in current_polyline]
             cv2.polylines(canvas, [np.array(pts, dtype=np.int32)], False, (0, 0, 255), 2)
@@ -192,7 +184,7 @@ def refine_contour_gui(img, contour_cnt):
         cv2.imshow(EDITOR_WINDOW, canvas)
 
     def on_mouse(event, x, y, flags, param):
-        nonlocal polygon_cnt, current_polyline, last_scale, last_offset
+        nonlocal polygon_cnt, current_polyline, last_scale, last_offset, history
         if last_scale is None:
             return
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -200,12 +192,13 @@ def refine_contour_gui(img, contour_cnt):
             redraw()
         elif event == cv2.EVENT_RBUTTONDOWN:
             if len(current_polyline) > 1:
+                history.append(polygon_cnt.copy())  # save state before change
                 polygon_cnt = _integrate_polyline(polygon_cnt, current_polyline)
             current_polyline = []
             redraw()
 
-    print("Editor: Left-click to add polyline points, Right-click to insert into contour.")
-    print("        'u' undo point, 'c' clear polyline, Enter to finish.")
+    #print(\"Editor: Left-click to add polyline points, Right-click to insert into contour.\")
+    #print(\"        'u' undo point, 'c' clear polyline, 'z' undo last contour change, Enter to finish.\")
 
     cv2.namedWindow(EDITOR_WINDOW, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(EDITOR_WINDOW, on_mouse)
@@ -220,9 +213,13 @@ def refine_contour_gui(img, contour_cnt):
                 current_polyline.pop()
         elif key == ord('c'):
             current_polyline = []
+        elif key == ord('z'):
+            if history:
+                polygon_cnt = history.pop()  # restore last contour
 
     cv2.destroyWindow(EDITOR_WINDOW)
     return polygon_cnt
+
 
 # ------------------------------
 # Output directory helpers
