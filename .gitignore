@@ -21,3 +21,5 @@ debug/
 build/
 
 dist/
+
+output/

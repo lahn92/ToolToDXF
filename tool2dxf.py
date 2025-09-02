@@ -2,10 +2,11 @@ import cv2
 import numpy as np
 import sys
 import os
+import shutil
 import ezdxf
 from shapely.geometry import Polygon
 import tkinter as tk
-from tkinter import filedialog, simpledialog, messagebox
+from tkinter import filedialog, messagebox
 
 # ------------------------------
 # Helper functions
@@ -22,6 +23,7 @@ def order_points(pts):
     return rect
 
 def save_debug_image(img, folder, step, name):
+    os.makedirs(folder, exist_ok=True)
     filename = os.path.join(folder, f"{step:02d}_{name}.jpg")
     cv2.imwrite(filename, img)
     print(f"Step {step}: saved {filename}")
@@ -91,8 +93,7 @@ def _integrate_polyline(contour_cnt, polyline_pts):
     if start_idx <= end_idx:
         forward_poly = poly[:start_idx+1] + polyline_pts + poly[end_idx:]
     else:
-        # wrap: [0..start_idx] + polyline + [end_idx..end] but need to wrap slice
-        forward_poly = poly[:start_idx+1] + polyline_pts + poly[end_idx:]
+        forward_poly = poly[:start_idx+1] + polyline_pts + poly[end_idx:]  # wrap case identical
 
     # Backward: swap start/end and reverse polyline
     start2, end2 = end_idx, start_idx
@@ -105,10 +106,7 @@ def _integrate_polyline(contour_cnt, polyline_pts):
         removed_backward = n - (start2 - end2) - 1
 
     # Choose the integration that removes fewer original vertices
-    if removed_forward <= removed_backward:
-        new_poly = forward_poly
-    else:
-        new_poly = backward_poly
+    new_poly = forward_poly if removed_forward <= removed_backward else backward_poly
 
     # Optional tiny cleanup: merge very-close neighbors (avoid duplicate spikes)
     cleaned = [new_poly[0]]
@@ -167,8 +165,8 @@ def refine_contour_gui(img, contour_cnt):
         # Resize image
         resized = cv2.resize(base, new_size, interpolation=cv2.INTER_AREA)
 
-        # Create canvas with black background
-        canvas = np.ones((win_h, win_w, 3), dtype=np.uint8) * 255  # white background
+        # White background for the unused window area
+        canvas = np.ones((win_h, win_w, 3), dtype=np.uint8) * 255
         offset_x = (win_w - new_size[0]) // 2
         offset_y = (win_h - new_size[1]) // 2
         canvas[offset_y:offset_y+new_size[1], offset_x:offset_x+new_size[0]] = resized
@@ -226,14 +224,36 @@ def refine_contour_gui(img, contour_cnt):
     cv2.destroyWindow(EDITOR_WINDOW)
     return polygon_cnt
 
+# ------------------------------
+# Output directory helpers
+# ------------------------------
+
+def make_output_dirs_for_image(image_path, output_name):
+    """
+    Returns (base_dir, debug_dir, dxf_path) based on the chosen output_name.
+    Ensures a clean (overwritten) folder for each run.
+    """
+    # Use provided output_name (sanitized)
+    safe_name = "".join(c for c in output_name if c.isalnum() or c in (" ", "_", "-")).strip()
+    if not safe_name:
+        safe_name = os.path.splitext(os.path.basename(image_path))[0]
+    base_dir = os.path.join("output", safe_name)
+    debug_dir = os.path.join(base_dir, "debug")
+    # Overwrite behavior: remove existing folder entirely
+    if os.path.isdir(base_dir):
+        shutil.rmtree(base_dir)
+    os.makedirs(debug_dir, exist_ok=True)
+    dxf_path = os.path.join(base_dir, f"{safe_name}.dxf")
+    return base_dir, debug_dir, dxf_path
 
 # ------------------------------
 # Main detection function
 # ------------------------------
 
-def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
-    debug_folder = "debug"
-    os.makedirs(debug_folder, exist_ok=True)
+def detect_paper(image_path, paper_size='A4', offset_mm=1.0, output_name=None):
+    if output_name is None:
+        output_name = os.path.splitext(os.path.basename(image_path))[0]
+    base_dir, debug_dir, dxf_out_path = make_output_dirs_for_image(image_path, output_name)
     step = 1
 
     sizes = {
@@ -259,15 +279,15 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
 
     img = cv2.imread(image_path)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    save_debug_image(gray, debug_folder, step, "gray")
+    save_debug_image(gray, debug_dir, step, "gray")
     step += 1
 
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    save_debug_image(blurred, debug_folder, step, "blurred")
+    save_debug_image(blurred, debug_dir, step, "blurred")
     step += 1
 
     _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    save_debug_image(thresh, debug_folder, step, "thresh")
+    save_debug_image(thresh, debug_dir, step, "thresh")
     step += 1
 
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -299,7 +319,7 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
     if paper_contour is not None:
         contoured_img = img.copy()
         cv2.drawContours(contoured_img, [paper_contour], -1, (0, 255, 0), 8)
-        save_debug_image(contoured_img, debug_folder, step, "contoured")
+        save_debug_image(contoured_img, debug_dir, step, "contoured")
         step += 1
 
         src_pts = order_points(paper_contour.reshape(4, 2))
@@ -336,7 +356,7 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
 
         H, _ = cv2.findHomography(src_pts, dst_pts)
         warped = cv2.warpPerspective(img, H, (output_width, output_height))
-        save_debug_image(warped, debug_folder, step, "warped")
+        save_debug_image(warped, debug_dir, step, "warped")
         step += 1
 
         # Draw grid
@@ -347,23 +367,23 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
         for y_mm in range(0, int(dst_height_mm) + 1, 10):
             y_pix = int(y_mm * ppm_height)
             cv2.line(gridded, (0, y_pix), (output_width - 1, y_pix), (0, 0, 255), 2)
-        save_debug_image(gridded, debug_folder, step, "gridded")
+        save_debug_image(gridded, debug_dir, step, "gridded")
         step += 1
 
         # ------------------------------
         # Robust Tool detection on top of warped paper
         # ------------------------------
         gray_tool = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-        save_debug_image(gray_tool, debug_folder, step, "tool_gray")
+        save_debug_image(gray_tool, debug_dir, step, "tool_gray")
         step += 1
 
         _, tool_mask = cv2.threshold(gray_tool, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        save_debug_image(tool_mask, debug_folder, step, "tool_mask")
+        save_debug_image(tool_mask, debug_dir, step, "tool_mask")
         step += 1
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         tool_mask = cv2.morphologyEx(tool_mask, cv2.MORPH_CLOSE, kernel)
-        save_debug_image(tool_mask, debug_folder, step, "tool_closed")
+        save_debug_image(tool_mask, debug_dir, step, "tool_closed")
         step += 1
 
         tool_contours, _ = cv2.findContours(tool_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
@@ -376,12 +396,10 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
 
             tool_outline = warped.copy()
             cv2.drawContours(tool_outline, [largest_tool], -1, (0, 255, 0), 3)
-            save_debug_image(tool_outline, debug_folder, step, "tool_detected_smooth")
+            save_debug_image(tool_outline, debug_dir, step, "tool_detected_smooth")
             step += 1
 
-            os.makedirs(os.path.join(debug_folder, "dxf"), exist_ok=True)
-            dxf_path = os.path.join(debug_folder, "dxf", "tool_contour.dxf")
-            contour_to_dxf(largest_tool, dxf_path, offset_mm, ppm_width, ppm_height)
+            contour_to_dxf(largest_tool, dxf_out_path, offset_mm, ppm_width, ppm_height)
         else:
             print("⚠️ No tool contours found.")
     else:
@@ -391,10 +409,10 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0):
 # GUI for input instead of CLI
 # ------------------------------
 class SettingsDialog(tk.Toplevel):
-    def __init__(self, parent):
+    def __init__(self, parent, default_name):
         super().__init__(parent)
         self.title("Settings")
-        self.geometry("250x150")
+        self.geometry("300x220")
         self.result = None
 
         # Paper size dropdown
@@ -408,6 +426,12 @@ class SettingsDialog(tk.Toplevel):
         self.offset_entry = tk.Entry(self)
         self.offset_entry.insert(0, "1.0")
         self.offset_entry.pack()
+
+        # Output name input
+        tk.Label(self, text="Output name:").pack(pady=(10,0))
+        self.name_entry = tk.Entry(self)
+        self.name_entry.insert(0, default_name)
+        self.name_entry.pack()
 
         # Buttons
         btn_frame = tk.Frame(self)
@@ -424,13 +448,16 @@ class SettingsDialog(tk.Toplevel):
         except ValueError:
             messagebox.showerror("Invalid input", "Offset must be a number.")
             return
-        self.result = (self.paper_var.get(), offset)
+        name = self.name_entry.get().strip()
+        if not name:
+            messagebox.showerror("Invalid input", "Output name cannot be empty.")
+            return
+        self.result = (self.paper_var.get(), offset, name)
         self.destroy()
 
     def on_cancel(self):
         self.result = None
         self.destroy()
-
 
 def get_user_input():
     root = tk.Tk()
@@ -445,15 +472,17 @@ def get_user_input():
         messagebox.showerror("Error", "No file selected.")
         sys.exit(1)
 
-    # Ask for paper size + offset in dialog
-    dialog = SettingsDialog(root)
+    # Default output name = file stem
+    default_name = os.path.splitext(os.path.basename(image_path))[0]
+
+    # Ask for paper size + offset + output name in dialog
+    dialog = SettingsDialog(root, default_name)
     if dialog.result is None:
         sys.exit(1)
 
-    paper_size, offset_mm = dialog.result
-    return image_path, paper_size, offset_mm
-
+    paper_size, offset_mm, output_name = dialog.result
+    return image_path, paper_size, offset_mm, output_name
 
 if __name__ == "__main__":
-    image_path, paper_size, offset_mm = get_user_input()
-    detect_paper(image_path, paper_size, offset_mm)
+    image_path, paper_size, offset_mm, output_name = get_user_input()
+    detect_paper(image_path, paper_size, offset_mm, output_name)
