@@ -47,6 +47,77 @@ def contour_to_dxf(contour, output_path="tool.dxf", offset_mm=1.0, ppm_width=1.0
 # ------------------------------
 EDITOR_WINDOW = "Refine Tool Contour"
 
+def _cnt_to_list(cnt):
+    # cnt: (N,1,2) -> [(x,y), ...]
+    return [tuple(map(int, p)) for p in cnt.reshape(-1, 2)]
+
+def _list_to_cnt(pts):
+    # [(x,y), ...] -> (N,1,2) int32
+    return np.array(pts, dtype=np.int32).reshape(-1, 1, 2)
+
+def _closest_vertex_idx(point, poly_pts):
+    # poly_pts: list[(x,y)]
+    px, py = point
+    d2 = [(px - x) ** 2 + (py - y) ** 2 for (x, y) in poly_pts]
+    return int(np.argmin(d2))
+
+def _integrate_polyline(contour_cnt, polyline_pts):
+    """
+    Replace the shortest arc between the two closest vertices to the polyline's
+    endpoints with the polyline.
+    contour_cnt: (N,1,2)
+    polyline_pts: list[(x,y)] length >= 2
+    """
+    if len(polyline_pts) < 2:
+        return contour_cnt  # nothing to do
+
+    poly = _cnt_to_list(contour_cnt)
+    n = len(poly)
+    start_idx = _closest_vertex_idx(polyline_pts[0], poly)
+    end_idx   = _closest_vertex_idx(polyline_pts[-1], poly)
+
+    if n < 3 or start_idx == end_idx:
+        # Degenerate or nonsense; just insert after the start
+        new_poly = poly[:start_idx+1] + polyline_pts + poly[start_idx+1:]
+        return _list_to_cnt(new_poly)
+
+    # Compute number of vertices removed for each direction
+    if start_idx < end_idx:
+        removed_forward = end_idx - start_idx - 1
+    else:
+        removed_forward = n - (start_idx - end_idx) - 1  # wrap removal
+
+    # Forward path: keep [0..start_idx], add polyline, keep [end_idx..end]
+    if start_idx <= end_idx:
+        forward_poly = poly[:start_idx+1] + polyline_pts + poly[end_idx:]
+    else:
+        forward_poly = poly[:start_idx+1] + polyline_pts + poly[end_idx:]  # wrap case identical
+
+    # Backward: swap start/end and reverse polyline
+    start2, end2 = end_idx, start_idx
+    polyline_rev = list(reversed(polyline_pts))
+    if start2 <= end2:
+        backward_poly = poly[:start2+1] + polyline_rev + poly[end2:]
+        removed_backward = end2 - start2 - 1
+    else:
+        backward_poly = poly[:start2+1] + polyline_rev + poly[end2:]
+        removed_backward = n - (start2 - end2) - 1
+
+    # Choose the integration that removes fewer original vertices
+    new_poly = forward_poly if removed_forward <= removed_backward else backward_poly
+
+    # Optional tiny cleanup: merge very-close neighbors (avoid duplicate spikes)
+    cleaned = [new_poly[0]]
+    for p in new_poly[1:]:
+        if (p[0] - cleaned[-1][0])**2 + (p[1] - cleaned[-1][1])**2 > 1:  # >1px apart
+            cleaned.append(p)
+
+    # Light simplify to keep contour reasonable
+    cnt = _list_to_cnt(cleaned)
+    epsilon = 0.001 * cv2.arcLength(cnt, True)
+    cnt = cv2.approxPolyDP(cnt, epsilon, True)
+    return cnt
+
 def draw_instructions(canvas):
     """Overlay key instructions on the OpenCV canvas."""
     instructions = [
@@ -146,6 +217,7 @@ def refine_contour_gui(img, contour_cnt):
 
     cv2.destroyWindow(EDITOR_WINDOW)
     return polygon_cnt
+
 
 # ------------------------------
 # Output directory helpers
