@@ -11,7 +11,6 @@ from tkinter import filedialog, messagebox
 # ------------------------------
 # Helper functions
 # ------------------------------
-
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
@@ -46,79 +45,7 @@ def contour_to_dxf(contour, output_path="tool.dxf", offset_mm=1.0, ppm_width=1.0
 # ------------------------------
 # GUI polyline refinement (OpenCV)
 # ------------------------------
-
 EDITOR_WINDOW = "Refine Tool Contour"
-
-def _cnt_to_list(cnt):
-    # cnt: (N,1,2) -> [(x,y), ...]
-    return [tuple(map(int, p)) for p in cnt.reshape(-1, 2)]
-
-def _list_to_cnt(pts):
-    # [(x,y), ...] -> (N,1,2) int32
-    return np.array(pts, dtype=np.int32).reshape(-1, 1, 2)
-
-def _closest_vertex_idx(point, poly_pts):
-    # poly_pts: list[(x,y)]
-    px, py = point
-    d2 = [(px - x) ** 2 + (py - y) ** 2 for (x, y) in poly_pts]
-    return int(np.argmin(d2))
-
-def _integrate_polyline(contour_cnt, polyline_pts):
-    """
-    Replace the shortest arc between the two closest vertices to the polyline's
-    endpoints with the polyline.
-    contour_cnt: (N,1,2)
-    polyline_pts: list[(x,y)] length >= 2
-    """
-    if len(polyline_pts) < 2:
-        return contour_cnt  # nothing to do
-
-    poly = _cnt_to_list(contour_cnt)
-    n = len(poly)
-    start_idx = _closest_vertex_idx(polyline_pts[0], poly)
-    end_idx   = _closest_vertex_idx(polyline_pts[-1], poly)
-
-    if n < 3 or start_idx == end_idx:
-        # Degenerate or nonsense; just insert after the start
-        new_poly = poly[:start_idx+1] + polyline_pts + poly[start_idx+1:]
-        return _list_to_cnt(new_poly)
-
-    # Compute number of vertices removed for each direction
-    if start_idx < end_idx:
-        removed_forward = end_idx - start_idx - 1
-    else:
-        removed_forward = n - (start_idx - end_idx) - 1  # wrap removal
-
-    # Forward path: keep [0..start_idx], add polyline, keep [end_idx..end]
-    if start_idx <= end_idx:
-        forward_poly = poly[:start_idx+1] + polyline_pts + poly[end_idx:]
-    else:
-        forward_poly = poly[:start_idx+1] + polyline_pts + poly[end_idx:]  # wrap case identical
-
-    # Backward: swap start/end and reverse polyline
-    start2, end2 = end_idx, start_idx
-    polyline_rev = list(reversed(polyline_pts))
-    if start2 <= end2:
-        backward_poly = poly[:start2+1] + polyline_rev + poly[end2:]
-        removed_backward = end2 - start2 - 1
-    else:
-        backward_poly = poly[:start2+1] + polyline_rev + poly[end2:]
-        removed_backward = n - (start2 - end2) - 1
-
-    # Choose the integration that removes fewer original vertices
-    new_poly = forward_poly if removed_forward <= removed_backward else backward_poly
-
-    # Optional tiny cleanup: merge very-close neighbors (avoid duplicate spikes)
-    cleaned = [new_poly[0]]
-    for p in new_poly[1:]:
-        if (p[0] - cleaned[-1][0])**2 + (p[1] - cleaned[-1][1])**2 > 1:  # >1px apart
-            cleaned.append(p)
-
-    # Light simplify to keep contour reasonable
-    cnt = _list_to_cnt(cleaned)
-    epsilon = 0.001 * cv2.arcLength(cnt, True)
-    cnt = cv2.approxPolyDP(cnt, epsilon, True)
-    return cnt
 
 def draw_instructions(canvas):
     """Overlay key instructions on the OpenCV canvas."""
@@ -220,23 +147,15 @@ def refine_contour_gui(img, contour_cnt):
     cv2.destroyWindow(EDITOR_WINDOW)
     return polygon_cnt
 
-
 # ------------------------------
 # Output directory helpers
 # ------------------------------
-
 def make_output_dirs_for_image(image_path, output_name):
-    """
-    Returns (base_dir, debug_dir, dxf_path) based on the chosen output_name.
-    Ensures a clean (overwritten) folder for each run.
-    """
-    # Use provided output_name (sanitized)
     safe_name = "".join(c for c in output_name if c.isalnum() or c in (" ", "_", "-")).strip()
     if not safe_name:
         safe_name = os.path.splitext(os.path.basename(image_path))[0]
     base_dir = os.path.join("output", safe_name)
     debug_dir = os.path.join(base_dir, "debug")
-    # Overwrite behavior: remove existing folder entirely
     if os.path.isdir(base_dir):
         shutil.rmtree(base_dir)
     os.makedirs(debug_dir, exist_ok=True)
@@ -246,7 +165,6 @@ def make_output_dirs_for_image(image_path, output_name):
 # ------------------------------
 # Main detection function
 # ------------------------------
-
 def detect_paper(image_path, paper_size='A4', offset_mm=1.0, output_name=None):
     if output_name is None:
         output_name = os.path.splitext(os.path.basename(image_path))[0]
@@ -402,8 +320,9 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0, output_name=None):
     else:
         print("⚠️ No rectangular contour found.")
 
+
 # ------------------------------
-# GUI for input instead of CLI
+# GUI dialogs
 # ------------------------------
 class SettingsDialog(tk.Toplevel):
     def __init__(self, parent, default_name):
@@ -412,25 +331,21 @@ class SettingsDialog(tk.Toplevel):
         self.geometry("300x220")
         self.result = None
 
-        # Paper size dropdown
         tk.Label(self, text="Paper size:").pack(pady=(10,0))
         self.paper_var = tk.StringVar(value="A4")
         options = ["A0","A1","A2","A3","A4","A5","A6","A7","A8"]
         tk.OptionMenu(self, self.paper_var, *options).pack()
 
-        # Offset text input
         tk.Label(self, text="Offset (mm):").pack(pady=(10,0))
         self.offset_entry = tk.Entry(self)
         self.offset_entry.insert(0, "1.0")
         self.offset_entry.pack()
 
-        # Output name input
         tk.Label(self, text="Output name:").pack(pady=(10,0))
         self.name_entry = tk.Entry(self)
         self.name_entry.insert(0, default_name)
         self.name_entry.pack()
 
-        # Buttons
         btn_frame = tk.Frame(self)
         btn_frame.pack(pady=10)
         tk.Button(btn_frame, text="OK", width=10, command=self.on_ok).pack(side=tk.LEFT, padx=5)
@@ -456,30 +371,86 @@ class SettingsDialog(tk.Toplevel):
         self.result = None
         self.destroy()
 
+class ModeDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Choose Mode")
+        self.geometry("250x120")
+        self.result = None
+
+        tk.Label(self, text="Select processing mode:").pack(pady=10)
+        tk.Button(self, text="Single tool", width=15, command=self.single).pack(pady=5)
+        tk.Button(self, text="Multiple tools", width=15, command=self.multiple).pack(pady=5)
+
+        self.grab_set()
+        self.wait_window()
+
+    def single(self):
+        self.result = "single"
+        self.destroy()
+
+    def multiple(self):
+        self.result = "multiple"
+        self.destroy()
+
+# ------------------------------
+# Input handling
+# ------------------------------
 def get_user_input():
     root = tk.Tk()
-    root.withdraw()  # Hide root window
+    root.withdraw()
 
-    # Ask for image file
-    image_path = filedialog.askopenfilename(
-        title="Select an image file",
-        filetypes=[("Image Files", "*.jpg;*.jpeg;*.png;*.bmp;*.tif;*.tiff"), ("All files", "*.*")]
-    )
-    if not image_path:
-        messagebox.showerror("Error", "No file selected.")
+    mode_dialog = ModeDialog(root)
+    if mode_dialog.result is None:
         sys.exit(1)
 
-    # Default output name = file stem
-    default_name = os.path.splitext(os.path.basename(image_path))[0]
+    if mode_dialog.result == "single":
+        image_path = filedialog.askopenfilename(
+            title="Select an image file",
+            filetypes=[("Image Files", "*.jpg;*.jpeg;*.png;*.bmp;*.tif;*.tiff"), ("All files", "*.*")]
+        )
+        if not image_path:
+            messagebox.showerror("Error", "No file selected.")
+            sys.exit(1)
 
-    # Ask for paper size + offset + output name in dialog
-    dialog = SettingsDialog(root, default_name)
-    if dialog.result is None:
-        sys.exit(1)
+        default_name = os.path.splitext(os.path.basename(image_path))[0]
+        dialog = SettingsDialog(root, default_name)
+        if dialog.result is None:
+            sys.exit(1)
 
-    paper_size, offset_mm, output_name = dialog.result
-    return image_path, paper_size, offset_mm, output_name
+        paper_size, offset_mm, output_name = dialog.result
+        return "single", [(image_path, paper_size, offset_mm, output_name)]
 
+    else:
+        folder = filedialog.askdirectory(title="Select a folder with images")
+        if not folder:
+            messagebox.showerror("Error", "No folder selected.")
+            sys.exit(1)
+
+        files = [os.path.join(folder, f) for f in os.listdir(folder)
+                 if f.lower().endswith((".jpg",".jpeg",".png",".bmp",".tif",".tiff"))]
+        if not files:
+            messagebox.showerror("Error", "No image files found in folder.")
+            sys.exit(1)
+
+        default_name = os.path.basename(folder)
+        dialog = SettingsDialog(root, default_name)
+        if dialog.result is None:
+            sys.exit(1)
+        paper_size, offset_mm, base_name = dialog.result
+
+        tasks = []
+        for i, f in enumerate(files, start=1):
+            output_name = f"{base_name}_{i}"
+            tasks.append((f, paper_size, offset_mm, output_name))
+
+        return "multiple", tasks
+
+# ------------------------------
+# Main
+# ------------------------------
 if __name__ == "__main__":
-    image_path, paper_size, offset_mm, output_name = get_user_input()
-    detect_paper(image_path, paper_size, offset_mm, output_name)
+    mode, tasks = get_user_input()
+    for image_path, paper_size, offset_mm, output_name in tasks:
+        print(f"\n=== Processing {image_path} -> {output_name} ===")
+        detect_paper(image_path, paper_size, offset_mm, output_name)
