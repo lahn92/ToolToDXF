@@ -4,7 +4,7 @@ import sys
 import os
 import shutil
 import ezdxf
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, MultiPolygon
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -27,21 +27,30 @@ def save_debug_image(img, folder, step, name):
     cv2.imwrite(filename, img)
     print(f"Step {step}: saved {filename}")
 
-def contour_to_dxf(contour, output_path="tool.dxf", offset_mm=1.0, ppm_width=1.0, ppm_height=1.0):
-    points_mm = []
-    for pt in contour.reshape(-1, 2):
-        x_mm = pt[0] / ppm_width
-        y_mm = pt[1] / ppm_height
-        points_mm.append((x_mm, y_mm))
-    poly = Polygon(points_mm)
-    poly_offset = poly.buffer(offset_mm, join_style=2)
-    exterior_coords = list(poly_offset.exterior.coords)
-    doc = ezdxf.new(dxfversion='R2010')
-    msp = doc.modelspace()
-    msp.add_lwpolyline(exterior_coords, close=True)
-    doc.saveas(output_path)
-    print(f"✅ DXF saved to {output_path}")
+def contour_to_dxf(contour, filename, offset_mm, ppm_width, ppm_height, img_height_pix):
+    # Create new DXF document
+    doc = ezdxf.new("R2010")
 
+    # Set units to millimeters
+    try:
+        doc.units = ezdxf.units.MM
+    except AttributeError:
+        doc.header['$INSUNITS'] = 4  # 4 = millimeters
+
+    msp = doc.modelspace()
+
+    # Convert contour points to mm, apply offset, and flip Y
+    points = []
+    for p in contour:
+        x_mm = (p[0][0] / ppm_width) + offset_mm
+        y_mm = ((img_height_pix - p[0][1]) / ppm_height) + offset_mm  # flip vertically
+        points.append((x_mm, y_mm))
+
+    # Create closed polyline
+    msp.add_lwpolyline(points, close=True)
+
+    doc.saveas(filename)
+    print(f"DXF saved to: {filename}")
 # ------------------------------
 # GUI polyline refinement (OpenCV)
 # ------------------------------
@@ -226,13 +235,32 @@ def make_output_dirs_for_image(image_path, output_name):
     safe_name = "".join(c for c in output_name if c.isalnum() or c in (" ", "_", "-")).strip()
     if not safe_name:
         safe_name = os.path.splitext(os.path.basename(image_path))[0]
+
     base_dir = os.path.join("output", safe_name)
     debug_dir = os.path.join(base_dir, "debug")
-    if os.path.isdir(base_dir):
-        shutil.rmtree(base_dir)
-    os.makedirs(debug_dir, exist_ok=True)
+
+    # Ensure base directory exists
+    os.makedirs(base_dir, exist_ok=True)
+
+    # Clean debug dir contents safely
+    if os.path.isdir(debug_dir):
+        for root, dirs, files in os.walk(debug_dir):
+            for f in files:
+                try:
+                    os.remove(os.path.join(root, f))
+                except PermissionError:
+                    pass
+            for d in dirs:
+                try:
+                    shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                except PermissionError:
+                    pass
+    else:
+        os.makedirs(debug_dir, exist_ok=True)
+
     dxf_path = os.path.join(base_dir, f"{safe_name}.dxf")
     return base_dir, debug_dir, dxf_path
+
 
 # ------------------------------
 # Main detection function
@@ -386,7 +414,8 @@ def detect_paper(image_path, paper_size='A4', offset_mm=1.0, output_name=None):
             save_debug_image(tool_outline, debug_dir, step, "tool_detected_smooth")
             step += 1
 
-            contour_to_dxf(largest_tool, dxf_out_path, offset_mm, ppm_width, ppm_height)
+            contour_to_dxf(largest_tool, dxf_out_path, offset_mm, ppm_width, ppm_height, img_height_pix=output_height)
+
         else:
             print("⚠️ No tool contours found.")
     else:
